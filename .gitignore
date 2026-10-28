@@ -1,0 +1,8 @@
+node_modules/
+.claude/
+.impeccable/
+.playwright-mcp/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

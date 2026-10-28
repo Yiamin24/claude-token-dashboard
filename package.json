@@ -1,0 +1,44 @@
+{
+  "name": "claude-token-dashboard",
+  "version": "1.0.0",
+  "description": "MCP server + local dashboard to see, switch on/off, and measure the token cost of Claude Code MCP servers, skills and plugins.",
+  "author": "Yiamin24",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "claude-token-dashboard": "server.js"
+  },
+  "files": [
+    "server.js",
+    "src/",
+    "public/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node server.js --standalone",
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yiamin24/claude-token-dashboard.git"
+  },
+  "homepage": "https://github.com/Yiamin24/claude-token-dashboard#readme",
+  "bugs": {
+    "url": "https://github.com/Yiamin24/claude-token-dashboard/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "model-context-protocol",
+    "tokens",
+    "dashboard",
+    "skills",
+    "plugins"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}

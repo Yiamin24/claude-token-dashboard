@@ -11,6 +11,10 @@ import { setItemState } from './toggle.js';
 import { probeServer } from './probe.js';
 import { Tracker } from './tracker.js';
 import { updateState } from './state.js';
+import { plan as autoPlan, apply as autoApply, undo as autoUndo, runAll, getAutoState, setAutoPrefs, setTask, classify, projectSignals, projectClues, CATEGORIES } from './auto.js';
+import * as learn from './learn.js';
+import { aiPrefs, setAiPrefs, detect as aiDetect, runPass as aiRunPass, CLAUDE_MODELS } from './ai.js';
+import { loadState } from './state.js';
 
 const APP_ID = 'claude-token-dashboard';
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -120,6 +124,56 @@ export class Dashboard {
     // Fallback rescan for anything the watchers miss.
     this.rescanTimer = setInterval(() => this.rescan(), 15000);
     this.rescanTimer.unref();
+    // Auto mode: prepare every project's settings in the background (only when switched on).
+    this.scheduleAuto(5000);
+    this.autoTimer = setInterval(() => this.scheduleAuto(0), 10 * 60000);
+    this.autoTimer.unref();
+    // AI helper: classify what the rules can't (only when a provider is chosen).
+    this.aiSoon = setTimeout(() => this.aiPass(), 15000);
+    this.aiTimer = setInterval(() => this.aiPass(), 30 * 60000);
+    this.aiTimer.unref();
+  }
+
+  async aiPass() {
+    if (aiPrefs().provider === 'off') return 0;
+    try {
+      const projects = new Set([this.launchProject, ...(this.activeProjects || [])]);
+      const items = new Map();
+      for (const p of projects) {
+        const inv = inventory(p, { track: false });
+        for (const it of [...inv.mcps, ...inv.skills]) {
+          if (it.agent !== 'claude') continue;
+          const key = learn.usageKey(it);
+          const c = classify(it);
+          if (key && !c.domain.length && !c.general && !learn.aiItem(key)) items.set(key, { key, name: it.displayName, description: it.description || it.target || '' });
+        }
+      }
+      const tasks = Object.values(loadState().autoTask || {}).map((t) => t.text).filter((t) => t && !learn.aiTask(t));
+      const projs = [];
+      for (const p of knownProjects(this.launchProject).slice(0, 40)) {
+        if (projs.length >= 5) break;
+        if (!learn.aiProject(p.path) && !projectSignals(p.path).categories.length) projs.push({ path: p.path, clues: projectClues(p.path) });
+      }
+      const n = await aiRunPass({ items: [...items.values()], tasks, projects: projs, CATEGORIES });
+      if (n) { learn.save(true); invalidateInventory(); this.broadcast('inventory'); this.scheduleAuto(2000); }
+      return n;
+    } catch (e) { log('AI pass failed:', e.message); return 0; }
+  }
+
+  scheduleAuto(delay) {
+    clearTimeout(this.autoSoon);
+    this.autoSoon = setTimeout(() => {
+      try {
+        const r = runAll(this.launchProject);
+        if (r.length) {
+          log(`auto mode updated ${r.length} project(s)`);
+          this.lastAutoRun = { at: new Date().toISOString(), results: r };
+          invalidateInventory();
+          this.broadcast('inventory');
+        }
+      } catch (e) { log('auto mode failed:', e.message); }
+    }, delay);
+    this.autoSoon.unref?.();
   }
 
   watchProject(project) {
@@ -177,7 +231,7 @@ export class Dashboard {
         if (this.sigs.get(key) !== sig) { this.sigs.set(key, sig); changed = true; }
       } catch (e) { log('scan failed:', e.message); }
     }
-    if (changed) this.broadcast('inventory');
+    if (changed) { this.broadcast('inventory'); this.scheduleAuto(30000); }
   }
 
   savingsFor(cwd) {
@@ -229,6 +283,16 @@ export class Dashboard {
       return send(res, 200, inventory(project, { fresh: url.searchParams.has('fresh') }));
     }
 
+    if (route === 'GET /api/auto') {
+      const st = getAutoState(project);
+      return send(res, 200, { ...st, excludedHere: st.prefs.excluded.includes(projKey(project)), plan: autoPlan(project) });
+    }
+
+    if (route === 'GET /api/learn') {
+      learn.reload();
+      return send(res, 200, { ...learn.summary(project), aiPrefs: aiPrefs(), aiAvailable: await aiDetect(), claudeModels: CLAUDE_MODELS });
+    }
+
     if (route === 'GET /api/stats') {
       if (!this.tracker) return send(res, 200, { ready: false });
       return send(res, 200, this.tracker.snapshot(project));
@@ -275,6 +339,43 @@ export class Dashboard {
       return send(res, 200, { ok: true, results: results.map(({ tools, ...r }) => r) });
     }
 
+    if (url.pathname === '/api/auto') {
+      let r;
+      try {
+        if (body.action === 'prefs') { setAutoPrefs(body.prefs || {}); if (body.prefs?.enabled) this.scheduleAuto(1000); r = { ok: true }; }
+        else if (body.action === 'task') { setTask(bproject, body.task || ''); if (body.task) setTimeout(() => this.aiPass().then(() => this.broadcast('inventory')), 200); r = { ok: true }; }
+        else if (body.action === 'apply') { const a = autoApply(bproject); r = { ok: true, done: a.done.length, failed: a.failed, savedPerRequest: a.savedPerRequest }; }
+        else if (body.action === 'undo') { r = { ok: true, ...autoUndo(bproject) }; }
+        else if (body.action === 'exclude') {
+          const ex = new Set(getAutoState(bproject).prefs.excluded);
+          body.on ? ex.add(projKey(bproject)) : ex.delete(projKey(bproject));
+          setAutoPrefs({ excluded: [...ex] });
+          r = { ok: true };
+        } else r = { ok: false, message: 'Unknown action' };
+      } catch (e) { r = { ok: false, message: e.message }; }
+      this.savingsCache.clear();
+      this.broadcast('inventory');
+      return send(res, r.ok ? 200 : 400, r);
+    }
+
+    if (url.pathname === '/api/learn') {
+      if (body.action === 'ai-prefs') {
+        const patch = {};
+        if (['off', 'ollama', 'anthropic'].includes(body.provider)) patch.provider = body.provider;
+        if (typeof body.model === 'string') patch.model = body.model.trim().slice(0, 100);
+        setAiPrefs(patch);
+        if (patch.provider && patch.provider !== 'off') setTimeout(() => this.aiPass(), 500);
+        return send(res, 200, { ok: true, prefs: aiPrefs() });
+      }
+      if (body.action === 'ai-run') {
+        if (aiPrefs().provider === 'off') return send(res, 400, { ok: false, message: 'Pick an AI helper first' });
+        const n = await this.aiPass();
+        const last = learn.summary().ai.log[0];
+        return send(res, 200, { ok: true, added: n, last });
+      }
+      return send(res, 400, { ok: false, message: 'Unknown action' });
+    }
+
     if (url.pathname === '/api/ack') {
       ackNew(body.ids || 'all');
       this.broadcast('inventory');
@@ -302,6 +403,10 @@ export class Dashboard {
   close() {
     clearInterval(this.takeover);
     clearInterval(this.rescanTimer);
+    clearInterval(this.autoTimer);
+    clearInterval(this.aiTimer);
+    clearTimeout(this.aiSoon);
+    clearTimeout(this.autoSoon);
     for (const w of this.watchers) { try { w.close(); } catch {} }
     this.tracker?.stop();
     for (const c of this.clients) { try { c.end(); } catch {} }

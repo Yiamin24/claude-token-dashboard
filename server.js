@@ -10,6 +10,7 @@ import { Dashboard, openBrowser } from './src/web.js';
 import { inventory } from './src/scan.js';
 import { setItemState } from './src/toggle.js';
 import { loadLedger } from './src/tracker.js';
+import { plan as autoPlan, apply as autoApply, undo as autoUndo, setTask, CATEGORIES } from './src/auto.js';
 import { fmtNum, log } from './src/util.js';
 
 const launchProject = process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -58,6 +59,18 @@ function startMcp() {
         required: ['name', 'state'],
       },
     },
+    {
+      name: 'context_auto',
+      description: 'Work out which MCP servers and skills this project and task need, and switch the rest off (preview unless apply is true). Applies to the next session.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'What the user is working on, e.g. "fix the checkout page" or "reverse engineer this apk". Empty string clears it.' },
+          apply: { type: 'boolean', description: 'Make the changes (default false = preview)' },
+          undo: { type: 'boolean', description: 'Put back everything auto mode switched here' },
+        },
+      },
+    },
   ];
 
   const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
@@ -74,7 +87,34 @@ function startMcp() {
       const r = setItemState({ project: launchProject, name: args.name, state: args.state, scope: args.scope || 'project', agent: args.agent || 'claude' });
       return text(r.message, !r.ok);
     }
+    if (name === 'context_auto') return text(autoTool(args));
     throw Object.assign(new Error(`Unknown tool ${name}`), { code: -32602 });
+  }
+
+  function autoTool({ task, apply, undo }) {
+    if (undo) {
+      const r = autoUndo(launchProject);
+      return r.restored.length ? `Put back ${r.restored.length} item(s): ${r.restored.join(', ')}. Start a new session to load them.` : 'Auto mode had not changed anything in this project.';
+    }
+    if (typeof task === 'string') setTask(launchProject, task);
+    const r = apply ? autoApply(launchProject) : autoPlan(launchProject);
+    const lines = [];
+    const label = (c) => CATEGORIES[c]?.label || c;
+    lines.push(`Project: ${r.project}`);
+    if (r.reason) return [...lines, r.reason].join('\n');
+    lines.push(`This project needs: ${r.needs.map(label).join(', ')}${r.task ? ` (task: "${r.task.text}")` : ''}.`);
+    const ev = Object.entries(r.signals.evidence).slice(0, 5).map(([c, e]) => `${label(c)} (${e.join(', ')})`);
+    if (ev.length) lines.push(`Clues: ${ev.join('; ')}.`);
+    const list = apply ? r.done : r.changes;
+    if (!list.length) lines.push('Nothing to change: what loads already fits.');
+    else {
+      lines.push(`${apply ? 'Changed' : 'Would change'} ${list.length} item(s), ~${fmtNum(Math.abs(r.savedPerRequest))} tokens/request ${r.savedPerRequest >= 0 ? 'saved' : 'added'}:`);
+      for (const c of list) lines.push(`- ${c.name} (${c.kind}): ${c.from} -> ${c.to} · ${c.why}`);
+    }
+    if (apply && r.failed.length) lines.push(`Could not change: ${r.failed.map((f) => `${f.name} (${f.message})`).join('; ')}`);
+    if (r.recommend.length) lines.push(`Other tools (switch there or in the dashboard): ${r.recommend.slice(0, 8).map((x) => `${x.name} in ${x.agent}`).join(', ')}.`);
+    lines.push(apply ? 'Start a new Claude Code session in this project to use the new set.' : 'Call again with apply: true to make these changes.');
+    return lines.join('\n');
   }
 
   function report(limit, agent) {

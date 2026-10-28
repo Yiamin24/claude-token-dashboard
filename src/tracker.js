@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { DATA_DIR, PROJECTS_DIR, readJson, writeJsonAtomic, projKey, normProject, log } from './util.js';
+import * as learn from './learn.js';
 
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
 const BACKFILL_DAYS = 7;
@@ -84,6 +85,7 @@ export class Tracker extends EventEmitter {
     clearInterval(this.poll);
     try { this.watcher?.close(); } catch {}
     this.flush();
+    learn.save(true);
   }
 
   listTranscripts() {
@@ -142,6 +144,7 @@ export class Tracker extends EventEmitter {
         } finally {
           await fh.close();
         }
+        if (st.learnTs) learn.markLearned(file, st.learnTs);
       } while (st.again);
     } finally {
       st.busy = false;
@@ -149,9 +152,13 @@ export class Tracker extends EventEmitter {
   }
 
   handleLine(file, st, line) {
-    if (!line.includes('"usage"') || !line.includes('"assistant"')) return;
+    const hasUsage = line.includes('"usage"') && line.includes('"assistant"');
+    const hasTool = line.includes('"tool_use"');
+    const hasCmd = line.includes('<command-name>');
+    if (!hasUsage && !hasTool && !hasCmd) return;
     let j;
     try { j = JSON.parse(line); } catch { return; }
+    this.learnFrom(file, st, j);
     if (j.type !== 'assistant' || !j.message?.usage || !j.message.id) return;
     if (st.ids.has(j.message.id)) return;
     st.ids.add(j.message.id);
@@ -212,6 +219,34 @@ export class Tracker extends EventEmitter {
       if (this.recent.length > 60) this.recent.length = 60;
     }
     if (this.ready) this.emit('update', { live: true, project: pk, saved });
+  }
+
+  /** Learning: which skills / MCP servers / slash commands get used, per project. */
+  learnFrom(file, st, j) {
+    const ts = Date.parse(j.timestamp) || 0;
+    const cwd = j.cwd;
+    if (!ts || !cwd) return;
+    const fresh = learn.shouldLearn(file, ts);
+    if (!st.sessionSeen) {
+      st.sessionSeen = true;
+      if (fresh && !j.isSidechain) learn.recordSession({ cwd, ts });
+    }
+    if (!fresh) return;
+    const content = j.message?.content;
+    if (j.type === 'assistant' && Array.isArray(content)) {
+      for (const b of content) {
+        if (b?.type !== 'tool_use' || !b.id || (st.toolIds ||= new Set()).has(b.id)) continue;
+        st.toolIds.add(b.id);
+        learn.recordToolUse({ cwd, ts, name: b.name, input: b.input });
+      }
+    } else if (j.type === 'user') {
+      const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((c) => c?.text || '').join(' ') : '';
+      const m = /<command-name>\/?([^<\s]+)<\/command-name>/.exec(text);
+      if (m && !['clear', 'compact', 'exit', 'help', 'model', 'config', 'login', 'logout', 'resume', 'mcp', 'context', 'cost', 'status', 'init', 'memory', 'agents', 'hooks', 'permissions', 'ide', 'doctor', 'bug', 'review', 'fast', 'effort'].includes(m[1])) {
+        learn.recordCommand({ cwd, ts, command: m[1] });
+      }
+    }
+    st.learnTs = Math.max(st.learnTs || 0, ts);
   }
 
   scheduleSave() {

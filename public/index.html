@@ -314,6 +314,8 @@ const ICONS = {
   plugin: '<path d="M10 4h4v3a2 2 0 1 0 0 0h3v4h-1a2 2 0 1 0 0 4h1v5h-5v-1a2 2 0 1 0-4 0v1H4v-5h1a2 2 0 1 0 0-4H4V7h6z"/>',
   agent: '<path d="M8 4h8M12 4v3M6 7h12v11H6zM9.5 12h.01M14.5 12h.01M9 15h6"/>',
   live: '<path d="M3 12h4l2-6 4 12 2-6h6"/>',
+  learn: '<path d="M12 3a6 6 0 0 0-4 10.5V16h8v-2.5A6 6 0 0 0 12 3zM9.5 19h5M10.5 21.5h3"/>',
+  auto: '<path d="M4 20L15 9M14 4l1.2 2.3L17.5 7.5 15.2 8.7 14 11l-1.2-2.3L10.5 7.5l2.3-1.2zM19.5 12l.7 1.3 1.3.7-1.3.7-.7 1.3-.7-1.3-1.3-.7 1.3-.7z"/>',
   scan: '<path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M8 12h8"/>',
   bolt: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>',
 };
@@ -357,7 +359,7 @@ async function loadProjects() {
   $('#project').innerHTML = j.projects.map((p) =>
     `<option value="${esc(p.path)}" ${p.path === S.project ? 'selected' : ''}>${esc(baseName(p.path))}${p.launch ? ' · this session' : ''}${own(p) ? ' · own ' + own(p) : ''}</option>`).join('');
 }
-async function loadInventory(fresh) { S.inv = await api('/api/inventory' + (fresh ? '?fresh=1' : '')); render(); }
+async function loadInventory(fresh) { S.inv = await api('/api/inventory' + (fresh ? '?fresh=1' : '')); if (S.auto && S.auto.plan?.project !== S.inv.project) S.auto = null; if (S.learnFor !== S.inv.project) { S.learn = null; S.learnFor = S.inv.project; } render(); }
 async function loadStats() {
   S.stats = await api('/api/stats');
   if (S.tab === 'overview' || S.tab === 'live') renderView(); else animateSaved();
@@ -381,6 +383,8 @@ const toolName = (id) => S.inv?.tools?.find((t) => t.id === id)?.name || id;
 const toolShort = (id) => S.inv?.tools?.find((t) => t.id === id)?.short || S.inv?.toolNames?.[id] || id;
 const TABS = [
   ['overview', 'Overview', null],
+  ['auto', 'Auto mode', null],
+  ['learn', 'Learning', null],
   ['mcp', 'MCP servers', () => byTool(S.inv.mcps)],
   ['skill', 'Skills', () => byTool(S.inv.skills)],
   ['plugin', 'Plugins', () => byTool(S.inv.plugins)],
@@ -415,6 +419,8 @@ function renderNotices() {
 function renderView() {
   if (!S.inv) return;
   if (S.tab === 'overview') return renderOverview();
+  if (S.tab === 'auto') return renderAuto();
+  if (S.tab === 'learn') return renderLearn();
   if (S.tab === 'live') return renderLive();
   renderList();
 }
@@ -639,6 +645,146 @@ function animateSaved() {
   animateSaved.f = requestAnimationFrame(step);
 }
 
+// ---------- auto mode ----------
+const CAT_LABELS = {
+  frontend: 'Web front end', design: 'Visual design', browser: 'Browser testing', android: 'Android', apple: 'iOS / macOS',
+  flutter: 'Flutter', mobile: 'Mobile app', data: 'Data & databases', cloud: 'Google Cloud / Firebase', reverse: 'Reverse engineering',
+  docs: 'Office documents', writing: 'Writing & copy', science: 'Science', ai: 'AI / LLM apps', payments: 'Payments', devops: 'DevOps & CI',
+};
+async function loadAuto() { S.auto = await api('/api/auto'); if (S.tab === 'auto') renderAuto(); }
+
+function renderAuto() {
+  const a = S.auto;
+  if (!a || !a.plan || a.plan.project !== S.inv.project) {
+    $('#view').innerHTML = '<div class="empty">Working out what this project needs…</div>';
+    if (!S.autoLoading) { S.autoLoading = true; loadAuto().finally(() => { S.autoLoading = false; }); }
+    return;
+  }
+  const p = a.plan, on = a.prefs.enabled;
+  const off = p.changes.filter((c) => c.to !== 'on'), back = p.changes.filter((c) => c.to === 'on');
+  const appliedCount = Object.keys(a.applied || {}).length;
+  const row = (c) => `<tr><td><b>${esc(c.name)}</b> <span class="k">· ${c.kind === 'mcp' ? 'MCP server' : 'skill'}</span>${c.learned ? ' <span class="pill good">learned</span>' : ''}<div class="k">${esc(c.why)}</div></td>
+    <td class="r"><span class="pill ${c.to === 'on' ? 'good' : ''}">${esc(c.from)} → ${esc(c.to)}</span></td><td class="r">${c.tokens ? (c.to === 'on' ? '+' : '−') + fmt(c.tokens) : '—'}</td></tr>`;
+  const needs = (p.needs || []).map((c) => `<span class="chip" style="cursor:default" title="${esc((p.signals.evidence[c] || []).join(', ') || 'from your task')}"><i></i>${esc(CAT_LABELS[c] || c)}</span>`).join('');
+  const clues = Object.entries(p.signals.evidence || {}).slice(0, 6).map(([c, e]) => `<li><b>${esc(CAT_LABELS[c] || c)}</b>: ${esc(e.join(', '))}</li>`).join('');
+  $('#view').innerHTML = `
+    <div class="grid">
+      <div class="card hero c5">
+        <div class="eyebrow"><span>Auto mode</span><button class="sw ${on ? 'on' : ''}" role="switch" aria-checked="${on}" aria-label="Auto mode" data-auto="toggle"></button></div>
+        <div class="k">${on ? 'On: every project gets the right MCP servers and skills, prepared before you open it.' : 'Off: nothing changes on its own. Preview and apply per project below.'}</div>
+        <div class="big" style="font-size:clamp(36px,4vw,52px)">${on ? 'On' : 'Off'}</div>
+        <div class="sub">Changes apply to the next Claude Code session in a project.${appliedCount ? ` · ${appliedCount} item${appliedCount > 1 ? 's' : ''} switched by auto here` : ''}</div>
+      </div>
+      <div class="card c7">
+        <h3>How careful</h3><div class="k">Auto mode never touches items it can't classify, process skills like planning and debugging, or anything you switched yourself.</div>
+        <div class="seg" style="margin-top:14px" id="automode">
+          <button data-automode="gentle" class="${p.mode === 'gentle' ? 'sel' : ''}">Gentle</button><button data-automode="strict" class="${p.mode === 'strict' ? 'sel' : ''}">Strict</button>
+        </div>
+        <p class="k" style="margin:10px 0 0">${p.mode === 'gentle' ? '<b>Gentle:</b> unneeded skills stay listed by name only, so Claude can still use them if asked. Unneeded MCP servers are switched off.' : '<b>Strict:</b> unneeded skills and MCP servers are switched off completely.'}</p>
+        <label class="k" style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type="checkbox" data-auto="exclude" ${a.excludedHere ? 'checked' : ''}> Never run auto mode in this project</label>
+      </div>
+
+      <div class="card c6">
+        <h3>What ${esc(baseName(S.inv.project))} needs</h3>
+        <div class="k">${p.reason ? esc(p.reason) : 'Worked out from the project\'s files and dependencies' + (p.task ? ' and your task' : '') + '.'}</div>
+        ${needs ? `<div class="chips" style="margin-top:12px">${needs}</div>` : ''}
+        ${clues ? `<ul class="k" style="margin:12px 0 0;padding-left:18px">${clues}</ul>` : ''}
+      </div>
+      <div class="card c6">
+        <h3>What are you working on?</h3>
+        <div class="k">Describe the task and auto mode adds what it needs, e.g. "reverse engineer this apk" or "make slides for the client".</div>
+        <div class="toolbar" style="margin:12px 0 0">
+          <input type="search" id="autotask" placeholder="Describe your task…" value="${esc(p.task?.text || '')}" aria-label="Task">
+          <button class="btn acc" data-auto="task">Use task</button>${p.task ? '<button class="btn" data-auto="cleartask">Clear</button>' : ''}
+        </div>
+        ${p.task?.categories?.length ? `<div class="k" style="margin-top:8px">Task adds: ${p.task.categories.map((c) => esc(CAT_LABELS[c] || c)).join(', ')}</div>` : (p.task ? '<div class="k" style="margin-top:8px">No specific tools recognised in that task.</div>' : '')}
+      </div>
+
+      <div class="card c12">
+        <div class="row-head"><div><h3>Planned changes for this project</h3><div class="k">${p.changes.length ? `${off.length} to switch off${back.length ? `, ${back.length} to bring back` : ''} · about ${fmt(Math.abs(p.savedPerRequest || 0))} tokens per request ${p.savedPerRequest >= 0 ? 'saved' : 'added'}` : 'Nothing to change: what loads already fits this project.'}</div></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">${p.changes.length ? '<button class="btn acc" data-auto="apply">Apply now</button>' : ''}${appliedCount ? '<button class="btn" data-auto="undo">Undo auto changes</button>' : ''}</div></div>
+        ${p.changes.length ? `<table style="margin-top:10px"><thead><tr><th>Item</th><th class="r">Change</th><th class="r">Tokens / request</th></tr></thead><tbody>${[...back, ...off].map(row).join('')}</tbody></table>` : ''}
+      </div>
+
+      ${p.recommend.length ? `<div class="card c12"><h3>Other tools</h3><div class="k">These servers aren't needed here either. Auto mode only changes Claude Code, so switch them in the tool (or with the chip if it allows).</div>
+        <div class="chips" style="margin-top:12px">${p.recommend.map((r) => `<button class="chip" data-toggle="${esc(r.id)}" ${r.switchable ? '' : 'disabled'} title="${esc(r.why)}${r.switchable ? ' · click to switch off' : ' · switch it inside the tool'}"><i></i>${esc(r.name)} · ${esc(toolShort(r.agent))}</button>`).join('')}</div></div>` : ''}
+
+      ${p.kept.length ? `<div class="card c12"><details><summary><b>Kept on</b> <span class="k">· ${p.kept.length} items stay because this project needs them or they're useful anywhere</span></summary>
+        <div class="chips" style="margin-top:12px">${p.kept.map((k) => `<span class="chip" style="cursor:default" title="${esc(k.why)}"><i></i>${esc(k.name)}</span>`).join('')}</div></details></div>` : ''}
+    </div>`;
+}
+
+async function autoAction(body, okMsg) {
+  const r = await api('/api/auto', body);
+  if (!r.ok) toast(r.message || 'Failed', true); else if (okMsg) toast(typeof okMsg === 'function' ? okMsg(r) : okMsg);
+  await Promise.all([loadAuto(), loadInventory()]);
+}
+
+// ---------- learning ----------
+const usageKey = (it) => (it.kind === 'mcp' ? 'mcp:' + String(it.name).replace(/[^A-Za-z0-9_-]/g, '_') : 'skill:' + it.displayName);
+const keyName = (k) => k.replace(/^(skill|mcp):/, '');
+async function loadLearn() { S.learn = await api('/api/learn'); if (S.tab === 'learn') renderLearn(); }
+
+function learnRows(arr, withProjects) {
+  if (!arr.length) return '<p class="k" style="margin-top:12px">Nothing yet. It learns as you work.</p>';
+  const when = (ts) => (ts ? ago(new Date(ts).toISOString()) : '');
+  return `<table style="margin-top:8px"><thead><tr><th>Item</th><th class="r">Uses</th><th class="r">Last used</th>${withProjects ? '<th class="r">Projects</th>' : ''}</tr></thead><tbody>${arr.map((x) => `<tr><td>${esc(keyName(x.key))} <span class="k">· ${x.key.startsWith('mcp:') ? 'MCP' : 'skill'}</span>${x.corrected ? ' <span class="pill good">you kept it</span>' : ''}</td><td class="r">${fmt(x.count)}</td><td class="r">${esc(when(x.last))}</td>${withProjects ? `<td class="r">${x.projects}</td>` : ''}</tr>`).join('')}</tbody></table>`;
+}
+
+function renderLearn() {
+  const L = S.learn;
+  if (!L || typeof L.sessions !== 'number') {
+    $('#view').innerHTML = '<div class="empty">Reading what you use…</div>';
+    if (!S.learnLoading) { S.learnLoading = true; loadLearn().finally(() => { S.learnLoading = false; }); }
+    return;
+  }
+  const used = new Set(L.topEverywhere.map((x) => x.key));
+  const loaded = [...S.inv.mcps, ...S.inv.skills].filter((x) => x.agent === 'claude' && x.state !== 'off' && (x.tokens || 0) > 0);
+  const neverUsed = loaded.filter((x) => !used.has(usageKey(x))).sort((a, b) => b.tokens - a.tokens);
+  const neverTokens = neverUsed.reduce((n, x) => n + (x.loaded || 0), 0);
+  const p = L.aiPrefs, av = L.aiAvailable;
+  const opts = (list, cur) => list.map((m) => `<option ${cur === m ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  const modelField = p.provider === 'anthropic'
+    ? `<select class="proj" id="aimodel" style="max-width:240px">${opts(L.claudeModels, p.model || L.claudeModels[0])}</select>`
+    : p.provider === 'ollama'
+      ? `<select class="proj" id="aimodel" style="max-width:240px">${opts(av.ollama.models.length ? av.ollama.models : ['(no models)'], p.model)}</select>`
+      : '';
+  const status = p.provider === 'anthropic'
+    ? (!av.anthropic.sdk ? 'Needs the Claude SDK: run <code>npm install</code> in the dashboard folder.' : av.anthropic.credentials ? 'Uses your ANTHROPIC_API_KEY.' : 'Uses ANTHROPIC_API_KEY or an <code>ant auth login</code> profile. Make sure one is set.')
+    : p.provider === 'ollama'
+      ? (av.ollama.available ? `Ollama is running with ${av.ollama.models.length} model(s). Nothing leaves your computer.` : 'Ollama isn\'t running. Install it from ollama.com, then run <code>ollama pull llama3.2</code>.')
+      : 'Off. Learning from your sessions works without it. The AI helper only sorts items the rules can\'t place.';
+  const log = L.ai.log.slice(0, 8).map((e) => `<tr><td><b>${esc(e.kind)}</b> <span class="k">${esc(ago(new Date(e.at).toISOString()))}</span><div class="k">${esc(e.what)}: ${esc(String(e.result || '').slice(0, 160))}</div></td></tr>`).join('');
+  $('#view').innerHTML = `
+    <div class="grid">
+      <div class="card hero c5">
+        <div class="eyebrow"><span>Learning</span><span>since ${L.since ? new Date(L.since).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '…'}</span></div>
+        <div class="k">Sessions it has learned from, across your projects</div>
+        <div class="big">${fmt(L.sessions)}</div>
+        <div class="sub">${fmt(L.projects)} projects · ${fmt(L.sessionsHere)} in ${esc(baseName(S.inv.project))} · gets better with every session</div>
+      </div>
+      <div class="card stat c3"><div class="k">Items you actually use</div><div class="big">${fmt(L.itemsSeen)}</div><div class="sub">out of ${fmt(loaded.length)} loaded every request</div></div>
+      <div class="card stat c4"><div class="k">Loaded but never used</div><div class="big" style="color:var(--accent)">${fmt(neverUsed.length)}</div><div class="sub">~${fmt(neverTokens)} tokens per request in this project · auto mode uses this</div></div>
+
+      <div class="card c6"><h3>What you use here</h3><div class="k">${esc(baseName(S.inv.project))}: auto mode always keeps these on</div>${learnRows(L.here, false)}</div>
+      <div class="card c6"><h3>What you use everywhere</h3><div class="k">Across all projects. Used in many kinds of projects = useful anywhere</div>${learnRows(L.topEverywhere.slice(0, 15), true)}</div>
+
+      <div class="card c12"><h3>Loaded every request, never used</h3><div class="k">Not used in any of your ${fmt(L.sessions)} sessions so far. Once there's a week of history, auto mode switches these off where they aren't needed.</div>
+        <div class="chips" style="margin-top:12px">${neverUsed.slice(0, 40).map((x) => `<span class="chip" style="cursor:default" title="${esc(x.sourceLabel)}"><i style="background:var(--off)"></i>${esc(x.displayName)} · ${fmt(x.loaded)}</span>`).join('') || '<span class="k">Everything that loads gets used.</span>'}</div></div>
+
+      <div class="card c7"><h3>AI helper</h3><div class="k">Sorts servers, skills, tasks and projects the keyword rules can't place. Each answer is saved, so each item is asked about once.</div>
+        <div class="toolbar" style="margin:14px 0 0">
+          <div class="seg">${[['off', 'Off'], ['ollama', 'Local (Ollama)'], ['anthropic', 'Claude API']].map(([v, l]) => `<button data-aiprov="${v}" class="${p.provider === v ? 'sel' : ''}">${l}</button>`).join('')}</div>
+          ${modelField}
+          ${p.provider !== 'off' ? '<button class="btn acc" data-ai="run">Ask now</button>' : ''}
+        </div>
+        <p class="k" style="margin:10px 0 0">${status}</p>
+        <p class="k" style="margin:6px 0 0">Answers so far: ${L.ai.items} items, ${L.ai.tasks} tasks, ${L.ai.projects} projects · ${fmt(L.ai.tokens.calls)} calls, ${fmt(L.ai.tokens.input + L.ai.tokens.output)} tokens used in total.</p>
+      </div>
+      <div class="card c5"><h3>Recent AI answers</h3>${log ? `<table style="margin-top:8px"><tbody>${log}</tbody></table>` : '<p class="k" style="margin-top:12px">None yet.</p>'}</div>
+    </div>`;
+}
+
 function renderLive() {
   const st = S.stats;
   if (!st || !st.series) { $('#view').innerHTML = '<div class="empty">Starting tracker…</div>'; return; }
@@ -736,6 +882,24 @@ const findItem = (id) => [...S.inv.mcps, ...S.inv.skills, ...S.inv.agents, ...S.
 
 document.addEventListener('click', async (e) => {
   const t = e.target.closest('button'); if (!t) return;
+  if (t.dataset.auto === 'toggle') { const on = !S.auto.prefs.enabled; if (on && !confirm('Turn on auto mode?\n\nIt will prepare Claude Code settings in every project it knows (written to each project\'s .claude/settings.local.json). You can undo per project.')) return; autoAction({ action: 'prefs', prefs: { enabled: on } }, on ? 'Auto mode is on. Projects are being prepared in the background.' : 'Auto mode is off. Nothing will change on its own.'); return; }
+  if (t.dataset.automode) { autoAction({ action: 'prefs', prefs: { mode: t.dataset.automode } }); return; }
+  if (t.dataset.auto === 'task') { autoAction({ action: 'task', task: $('#autotask').value.trim() }, 'Task saved. Check the planned changes, then apply.'); return; }
+  if (t.dataset.auto === 'cleartask') { autoAction({ action: 'task', task: '' }, 'Task cleared'); return; }
+  if (t.dataset.auto === 'apply') { autoAction({ action: 'apply' }, (r) => `Applied ${r.done} change${r.done === 1 ? '' : 's'}. Start a new Claude Code session here to use them.`); return; }
+  if (t.dataset.auto === 'undo') { autoAction({ action: 'undo' }, (r) => `Put back ${r.restored.length} item${r.restored.length === 1 ? '' : 's'}.`); return; }
+  if (t.dataset.aiprov) {
+    const r = await api('/api/learn', { action: 'ai-prefs', provider: t.dataset.aiprov, model: '' });
+    toast(r.ok ? (t.dataset.aiprov === 'off' ? 'AI helper off' : 'AI helper on. It sorts unknown items in the background.') : r.message, !r.ok);
+    await loadLearn(); return;
+  }
+  if (t.dataset.ai === 'run') {
+    t.disabled = true; t.innerHTML = '<span class="spin"></span>';
+    const r = await api('/api/learn', { action: 'ai-run' });
+    const failed = !r.ok || r.last?.kind === 'error';
+    toast(!r.ok ? r.message : failed ? r.last.result : r.added ? `Added ${r.added} answer(s)` : 'Nothing new to ask about', failed);
+    await Promise.all([loadLearn(), loadInventory()]); return;
+  }
   if (t.dataset.project) { S.project = t.dataset.project; store.set('project', S.project); $('#project').value = S.project; await Promise.all([loadInventory(), loadStats()]); window.scrollTo({ top: 0 }); return; }
   if (t.dataset.tool) { S.tool = t.dataset.tool; store.set('tool', S.tool); renderToolNav(); renderNav(); renderView(); return; }
   if (t.dataset.tab) { S.tab = t.dataset.tab; S.q = ''; S.filter = 'all'; store.set('tab', S.tab); renderNav(); renderView(); window.scrollTo({ top: 0 }); return; }
@@ -750,6 +914,11 @@ document.addEventListener('click', async (e) => {
   if (t.dataset.act === 'ack') { await api('/api/ack', { ids: 'all' }); await loadInventory(); return; }
   if (t.dataset.act === 'reset') { if (confirm('Reset the saved-tokens counter to zero?')) { await api('/api/reset-savings', {}); S.shownSaved = 0; await loadStats(); } }
 });
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'aimodel') api('/api/learn', { action: 'ai-prefs', model: e.target.value }).then(() => toast('Model saved'));
+  if (e.target.dataset?.auto === 'exclude') autoAction({ action: 'exclude', on: e.target.checked }, e.target.checked ? 'Auto mode will skip this project.' : 'Auto mode will include this project.');
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'autotask') document.querySelector('[data-auto="task"]')?.click(); });
 document.addEventListener('input', (e) => {
   if (e.target.id === 'q') { S.q = e.target.value; const pos = e.target.selectionStart; renderView(); const q = $('#q'); q.focus(); q.setSelectionRange(pos, pos); }
 });

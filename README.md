@@ -72,6 +72,43 @@ Measuring a server once covers every tool that runs the same server. Antigravity
 
 From Claude: `context_report` takes `agent` (`codex`, `gemini`, … or `all`). `context_toggle` takes `agent` too, and `agent: "all"` switches the same server in every tool that allows it.
 
+## Auto mode
+
+Auto mode switches Claude Code's MCP servers and skills to fit each project, and optionally the task you're on.
+
+- **By project:** it reads each project's dependencies and files. For example, `next` + `tailwindcss` means a web front end, `build.gradle` means Android, `.sql`/`.ipynb` files mean data work, binaries mean reverse engineering, and `.docx`/`.pptx` files mean Office documents. It then classifies every server and skill by its name, description and tools, and switches off the ones that project doesn't need.
+- **By task:** tell it what you're working on, either on the Auto mode page or by asking Claude (`context_auto` with `task`). For example, "reverse engineer this apk" brings `rea` back for that project.
+- **Ahead of time:** Claude Code reads these settings when a session starts. With auto mode on, every known project is prepared in the background (on start, every 10 minutes, and when something new is installed), so the right set is already there when you open a project.
+
+How careful it is:
+
+- **Off by default.** It shows a preview of every change and the reason for it.
+- **Gentle** (default) keeps unneeded skills listed by name only, so Claude can still use them if asked. **Strict** switches them off completely. Unneeded MCP servers are switched off in both modes.
+- **It leaves things alone when it isn't sure:** items it can't classify, process skills useful anywhere (planning, debugging, reviews, git), and anything you switched yourself, including later changes to something auto mode set.
+- **It only brings back what it switched off itself.** **Undo** puts back everything it changed in a project.
+- **It writes Claude Code's per-project `.claude/settings.local.json` only.** For other tools it lists the servers that aren't needed so you can switch them there.
+- **You can exclude a project** with "Never run auto mode in this project".
+
+## Learning: gets better every day
+
+Auto mode learns from how you actually work, so its decisions improve with every session.
+
+- **What you use:** it reads your Claude Code sessions and records which skills, MCP servers and slash commands get used, per project. On first start it reads your last 7 days, so it's useful right away. Anything you've used in a project in the last 30 days stays on there.
+- **Your fixes:** if you switch back on something auto mode turned off, that counts as a correction. The item stays on in that project, and auto mode leaves it alone from then on.
+- **Kinds of work:** an item used mostly in, say, data projects is learned as a data tool, even if its description doesn't say so. One used across very different projects is learned as useful anywhere.
+- **Never used:** once it has seen 20+ sessions over at least a week, skills that no project has used drop to name-only (Gentle) or off (Strict). Unused MCP servers are switched off only in Strict mode.
+
+The **Learning** page shows what it learned: what you use here and everywhere, and what loads on every request but is never used, with the token cost.
+
+### AI helper (optional)
+
+Some servers, skills, tasks and projects don't match any keyword rule. The AI helper sorts those into the same categories. It's **off by default**, every answer is saved (each item is asked about once), and the Learning page shows every answer and the total tokens used.
+
+- **Local (Ollama):** free, and nothing leaves your computer. Install [Ollama](https://ollama.com) and pull a model (`ollama pull llama3.2`).
+- **Claude API:** uses the official `@anthropic-ai/sdk` (installed as an optional dependency by `npm install`). Credentials come from `ANTHROPIC_API_KEY` or an `ant auth login` profile, and the dashboard never stores them. The default model is `claude-opus-5-5`, and you can pick `claude-sonnet-5-5` or `claude-haiku-5-5` on the Learning page. Requests use structured JSON output, low effort, and server-side refusal fallback (`fallbacks: "default"`).
+
+Learning data is stored in `~/.claude/token-dashboard/learned.json` on your computer.
+
 ## What it does
 
 | Area | Details |
@@ -91,11 +128,12 @@ Claude Code loads MCP tool definitions in one of two ways:
 
 Claude Code switches to deferred when MCP tools would fill more than about 10% of the context window. **auto** follows the same rule; you can force either mode from the MCP tab.
 
-## MCP tools (kept small: about 290 tokens)
+## MCP tools (kept small: about 500 tokens)
 
 - `dashboard`: opens the dashboard and returns its URL.
 - `context_report`: a text summary of what's loaded, the costs, savings so far and new items.
-- `context_toggle`: `{ name, state: on|off|name-only, scope: project|global }`.
+- `context_toggle`: `{ name, state: on|off|name-only, scope: project|global, agent }`.
+- `context_auto`: `{ task, apply, undo }`. Previews (or applies) auto mode for this project.
 
 ## Notes
 
@@ -113,6 +151,9 @@ Claude Code switches to deferred when MCP tools would fill more than about 10% o
 server.js        MCP stdio server + --standalone entry
 src/scan.js      finds items, works out on/off state and token cost, spots new items
 src/agents.js    other AI tools: Codex, Gemini, Antigravity, Kiro, Cursor, VS Code...
+src/auto.js      auto mode: project/task detection, plan, apply, undo
+src/learn.js     learning: usage per project, corrections, AI answers
+src/ai.js        optional AI helper (Ollama or Claude API)
 src/toggle.js    writes switches to Claude Code settings (with backups)
 src/probe.js     measures MCP servers (stdio and HTTP)
 src/tracker.js   live transcript tailing and the savings ledger

@@ -12,7 +12,7 @@
 <style>
 /* ---------- three styles: A Plate Blue · B Sand & Sport Orange · C Iron & Volt ---------- */
 :root, [data-style="b"] {
-  --bg: #f1ebe2; --side: #ebe3d7; --card: #fffdf9; --ink: #1b1713; --muted: #72695f; --faint: #a39a8f;
+  --bg: #f1ebe2; --side: #ebe3d7; --card: #fffdf9; --ink: #1b1713; --muted: #625a50; --faint: #a39a8f;
   --line: #e6ddd0; --empty: #e9e1d4;
   --accent: #f0561d; --accent-ink: #ffffff; --accent-soft: #fde6dc;
   --hero-bg: #fffdf9; --hero-ink: #1b1713; --hero-muted: #72695f; --hero-num: #1b1713; --hero-edge: #f0561d;
@@ -80,6 +80,24 @@ code { font-size: .9em; }
 .nav .ct { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .nav .nb { min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--new); color: #fff; font-size: 11px; line-height: 18px; text-align: center; font-weight: 700; }
 .side .grow { flex: 1; }
+.side h4 { margin: 4px 6px -8px; font-size: 12px; color: var(--muted); font-weight: 650; }
+.toolnav { display: flex; flex-direction: column; gap: 2px; }
+.toolnav button { display: flex; align-items: center; gap: 10px; border: 0; background: transparent; padding: 7px 10px; border-radius: 10px; text-align: left; color: var(--muted); font-size: 14px; font-weight: 550; }
+.toolnav button:hover { background: color-mix(in srgb, var(--card) 70%, transparent); color: var(--ink); }
+.toolnav button.sel { background: var(--card); color: var(--ink); }
+.toolnav .td { width: 10px; height: 10px; border-radius: 3px; background: var(--faint); flex: none; }
+.toolnav button.sel .td { background: var(--accent); }
+.toolnav .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolnav .ct { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 4px 10px 4px 8px; font-size: 12px; font-weight: 650; color: var(--ink); }
+.chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--on); }
+.chip.off { color: var(--faint); background: transparent; }
+.chip.off i { background: var(--off); }
+.chip:disabled { cursor: default; border-style: dashed; }
+.chip:not(:disabled):hover { border-color: var(--ink); }
+.tool-card { cursor: pointer; text-align: left; font: inherit; color: inherit; }
+.tool-card:hover { border-color: var(--faint); }
 .field { display: flex; flex-direction: column; gap: 6px; padding: 0 6px; }
 .field > span { font-size: 12px; color: var(--muted); font-weight: 600; }
 select.proj { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 13px; }
@@ -237,6 +255,8 @@ td.g { color: var(--on); font-weight: 700; }
       <div><b>Token Dashboard</b><span>for Claude Code</span></div>
     </div>
     <nav class="nav" id="nav" aria-label="Sections"></nav>
+    <h4>AI tools</h4>
+    <nav class="toolnav" id="toolnav" aria-label="AI tools"></nav>
     <div class="grow"></div>
     <label class="field"><span>Project</span><select class="proj" id="project"></select></label>
     <div class="field"><span>Apply changes to</span>
@@ -283,7 +303,7 @@ const store = { get(k, d) { try { return JSON.parse(localStorage.getItem('td.' +
 const baseName = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
 
 const S = {
-  project: null, launchProject: null, scope: 'project', tab: store.get('tab', 'overview'), q: '', filter: 'all',
+  project: null, launchProject: null, scope: 'project', tab: store.get('tab', 'overview'), tool: store.get('tool', 'all'), q: '', filter: 'all',
   inv: null, stats: null, probing: new Set(), busy: new Set(), shownSaved: 0,
 };
 
@@ -332,8 +352,10 @@ async function loadProjects() {
   const saved = store.get('project', null);
   const paths = j.projects.map((p) => p.path);
   S.project = saved && paths.includes(saved) ? saved : j.launchProject;
+  S.projects = j.projects;
+  const own = (p) => { const f = p.footprint || {}; const bits = []; if (f.mcps) bits.push(`${f.mcps} MCP`); if (f.skills) bits.push(`${f.skills} skill${f.skills === 1 ? '' : 's'}`); return bits.join(', '); };
   $('#project').innerHTML = j.projects.map((p) =>
-    `<option value="${esc(p.path)}" ${p.path === S.project ? 'selected' : ''}>${esc(baseName(p.path))}${p.launch ? ' · this session' : ''}${p.exists ? '' : ' · missing'}</option>`).join('');
+    `<option value="${esc(p.path)}" ${p.path === S.project ? 'selected' : ''}>${esc(baseName(p.path))}${p.launch ? ' · this session' : ''}${own(p) ? ' · own ' + own(p) : ''}</option>`).join('');
 }
 async function loadInventory(fresh) { S.inv = await api('/api/inventory' + (fresh ? '?fresh=1' : '')); render(); }
 async function loadStats() {
@@ -342,7 +364,7 @@ async function loadStats() {
 }
 
 // ---------- rendering ----------
-function render() { renderHeader(); renderNav(); renderNotices(); renderView(); }
+function render() { renderHeader(); renderToolNav(); renderNav(); renderNotices(); renderView(); }
 
 function renderHeader() {
   const h = new Date().getHours();
@@ -354,14 +376,25 @@ function renderHeader() {
   $('#avatar').textContent = (parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2)) || '··';
 }
 
+const byTool = (arr) => (S.tool === 'all' ? arr : arr.filter((x) => x.agent === S.tool));
+const toolName = (id) => S.inv?.tools?.find((t) => t.id === id)?.name || id;
+const toolShort = (id) => S.inv?.tools?.find((t) => t.id === id)?.short || S.inv?.toolNames?.[id] || id;
 const TABS = [
   ['overview', 'Overview', null],
-  ['mcp', 'MCP servers', () => S.inv.mcps],
-  ['skill', 'Skills', () => S.inv.skills],
-  ['plugin', 'Plugins', () => S.inv.plugins],
-  ['agent', 'Agents', () => S.inv.agents],
+  ['mcp', 'MCP servers', () => byTool(S.inv.mcps)],
+  ['skill', 'Skills', () => byTool(S.inv.skills)],
+  ['plugin', 'Plugins', () => byTool(S.inv.plugins)],
+  ['agent', 'Subagents', () => byTool(S.inv.agents)],
   ['live', 'Live usage', null],
 ];
+
+function renderToolNav() {
+  const tools = S.inv.tools || [];
+  if (S.tool !== 'all' && !tools.some((t) => t.id === S.tool)) S.tool = 'all';
+  const total = (t) => t.mcps.total + t.skills.total;
+  $('#toolnav').innerHTML = [`<button data-tool="all" class="${S.tool === 'all' ? 'sel' : ''}"><span class="td"></span><span class="lbl">All tools</span><span class="ct">${tools.length}</span></button>`,
+    ...tools.map((t) => `<button data-tool="${esc(t.id)}" class="${S.tool === t.id ? 'sel' : ''}" title="${esc(t.mcps.on)}/${esc(t.mcps.total)} MCP on · ${esc(t.skills.total)} skills"><span class="td"></span><span class="lbl">${esc(t.name)}</span><span class="ct">${total(t)}</span></button>`)].join('');
+}
 function renderNav() {
   $('#nav').innerHTML = TABS.map(([k, label, get]) => {
     const items = get ? get() : [];
@@ -416,7 +449,25 @@ function renderOverview() {
   const budget = [...Array(nm).fill(''), ...Array(ns).fill('b2'), ...Array(na).fill('b3')];
   while (budget.length < cells) budget.push('e');
   const todayIn = today ? today.input + today.cacheRead + today.cacheWrite : 0;
-  const all = [...inv.mcps, ...inv.skills, ...inv.agents].filter((x) => !isOff(x) && (x.tokens || 0) > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 6);
+  const all = byTool([...inv.mcps, ...inv.skills, ...inv.agents]).filter((x) => !isOff(x) && (x.tokens || 0) > 0).sort((a, b) => b.tokens - a.tokens);
+  const toolCards = (inv.tools || []).map((tl) => {
+    const ms = inv.mcps.filter((m) => m.agent === tl.id);
+    const ss = inv.skills.filter((s) => s.agent === tl.id);
+    return `<button class="card c4 tool-card" data-tool="${esc(tl.id)}">
+      <div class="row-head"><span class="k"><b style="color:var(--ink)">${esc(tl.name)}</b></span><span class="big">${ms.length ? `${tl.mcps.on} of ${tl.mcps.total} MCP` : `${tl.skills.total} skill${tl.skills.total === 1 ? '' : 's'}`}</span></div>
+      ${ms.length ? blocks(ms) : blocks(ss)}
+      <div class="sub">${tl.skills.total} skill${tl.skills.total === 1 ? '' : 's'}${tl.plugins.total ? ` · ${tl.plugins.on}/${tl.plugins.total} plugins` : ''} · ~${short(tl.activeTokens)} tokens / request${tl.unmeasuredMcps ? ` · ${tl.unmeasuredMcps} not measured` : ''}</div>
+    </button>`;
+  }).join('');
+  const projCards = (S.projects || []).filter((p) => p.footprint?.total).map((p) => {
+    const f = p.footprint;
+    const cur = p.path === S.project;
+    return `<button class="card c4 tool-card" data-project="${esc(p.path)}" ${cur ? 'style="border-color:var(--accent)"' : ''}>
+      <div class="row-head"><span class="k"><b style="color:var(--ink)">${esc(baseName(p.path))}</b>${cur ? ' · viewing' : ''}</span><span class="big">${f.mcps ? `${f.mcps} MCP` : ''}${f.mcps && f.skills ? ' · ' : ''}${f.skills ? `${f.skills} skill${f.skills === 1 ? '' : 's'}` : ''}</span></div>
+      <div class="chips" style="margin-top:14px">${f.tools.map((tid) => `<span class="chip" style="cursor:inherit"><i></i>${esc(toolShort(tid))}</span>`).join('')}</div>
+      <div class="sub">${esc(p.path)}</div>
+    </button>`;
+  }).join('');
   const needsMeasure = t.unmeasuredMcps > 0;
 
   $('#view').innerHTML = `
@@ -428,7 +479,7 @@ function renderOverview() {
         <div class="sub">${sv ? `${fmt(sv.today)} today · ${fmt(sv.requests)} ${sv.requests === 1 ? "request" : "requests"} tracked` : 'Starting tracker…'}</div>
       </div>
       <div class="card stat c4">
-        <div class="row-head"><span class="k">Loaded into every request</span></div>
+        <div class="row-head"><span class="k">Claude Code loads into every request</span></div>
         <div class="big">${fmt(t.activeTokens)}<small>tokens</small></div>
         <div class="blocks">${budget.map((c) => `<i class="${c}"></i>`).join('')}</div>
         <div class="legend"><span><b style="background:var(--block)"></b>MCP ${fmt(bk.mcp.active)}</span><span><b style="background:var(--block-2)"></b>Skills ${fmt(bk.skill.active)}</span><span><b style="background:var(--block-3)"></b>Agents ${fmt(bk.agent.active)}</span><span><b style="background:var(--empty)"></b>Off ${fmt(t.savedTokens)}</span></div>
@@ -438,16 +489,20 @@ function renderOverview() {
         <div class="big">${today ? short(todayIn) : '—'}<small>in</small></div>
         <div class="sub">${today ? `${short(today.output)} out<br>${fmt(today.requests)} requests<br>${todayIn ? Math.round((today.cacheRead / todayIn) * 100) : 0}% read from cache` : (st && !st.ready ? 'Reading recent sessions…' : 'All projects')}</div>
       </div>
-      ${countCard('MCP servers', inv.mcps, 'mcp')}
-      ${countCard('Plugins', inv.plugins, 'plugin')}
-      ${countCard('Skills', inv.skills, 'skill')}
+      ${countCard('MCP servers', byTool(inv.mcps), 'mcp')}
+      ${countCard('Plugins', byTool(inv.plugins), 'plugin')}
+      ${countCard('Skills', byTool(inv.skills), 'skill')}
       <div class="c6">${needsMeasure
         ? `<button class="cta" data-act="measure-all">${S.probing.size ? '<span class="spin"></span>' : icon('scan')} Measure ${t.unmeasuredMcps} MCP server${t.unmeasuredMcps > 1 ? 's' : ''}</button>`
         : `<button class="cta" data-tab="live">${icon('live')} Watch live usage</button>`}</div>
       <div class="c6"><button class="cta ghost" data-tab="skill">${icon('bolt')} Trim skills</button></div>
     </div>
-    <div class="section"><h2>Biggest items loaded now</h2><span class="k">Switch off what this project doesn't need</span></div>
-    <div class="items">${all.map((it) => itemCard(it, all[0]?.tokens || 1)).join('') || '<div class="empty">Nothing loaded.</div>'}</div>`;
+    <div class="section"><h2>Your AI tools</h2><span class="k">${(inv.tools || []).length} found on this computer · click one to filter</span></div>
+    <div class="grid">${toolCards}</div>
+    ${projCards ? `<div class="section"><h2>Projects with their own setup</h2><span class="k">${(S.projects || []).length} projects found across your tools · these add MCP servers or skills when you work in them</span></div>
+    <div class="grid">${projCards}</div>` : ''}
+    <div class="section"><h2>Biggest items loaded now${S.tool !== 'all' ? ' in ' + esc(toolName(S.tool)) : ''}</h2><span class="k">Switch off what this project doesn't need</span></div>
+    <div class="items">${cards(all, all[0]?.tokens || 1, { group: true, limit: 6 }) || '<div class="empty">Nothing loaded.</div>'}</div>`;
   animateSaved();
 }
 
@@ -470,7 +525,51 @@ function renderList() {
         <div class="seg tiny" id="mode" title="How MCP tool schemas are counted">${['auto', 'deferred', 'full'].map((m) => `<button data-m="${m}" class="${S.inv.mcpModePref === m ? 'sel' : ''}" title="${m === 'auto' ? 'Claude Code defers MCP tool schemas when they exceed ~10% of context' : m === 'deferred' ? 'Only tool names + server instructions load up front' : 'Full tool schemas load every request'}">${m}</button>`).join('')}</div>` : ''}
       <span class="note">${scopeNote}</span>
     </div>
-    <div class="items">${items.length ? items.map((it) => itemCard(it, max)).join('') : `<div class="empty">${q || S.filter !== 'all' ? 'Nothing matches.' : 'None found.'}</div>`}</div>`;
+    <div class="items">${items.length ? cards(items, max) : `<div class="empty">${q || S.filter !== 'all' ? 'Nothing matches.' : 'None found.'}</div>`}</div>`;
+}
+
+/** In "All tools", the same server or skill set up in several tools becomes one card with a switch per tool. */
+function cards(items, max, { group = S.tab === 'mcp' || S.tab === 'skill', limit = Infinity } = {}) {
+  if (S.tool !== 'all' || !group) return items.slice(0, limit).map((it) => itemCard(it, max)).join('');
+  const groups = new Map();
+  for (const it of items) {
+    const k = it.kind === 'mcp' ? 'm:' + it.configHash : 's:' + String(it.name).toLowerCase();
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(it);
+  }
+  return [...groups.values()].slice(0, limit).map((g) => (g.length > 1 ? groupCard(g, max) : itemCard(g[0], max))).join('');
+}
+
+function groupCard(g, max) {
+  const lead = g.slice().sort((a, b) => (b.measured ? 1 : 0) - (a.measured ? 1 : 0) || (b.tokens || 0) - (a.tokens || 0))[0];
+  const onCount = g.filter((x) => !isOff(x)).length;
+  const chips = g.map((x) => {
+    const can = x.toggleable !== false && x.kind !== 'agent' && !S.busy.has(x.id);
+    const tip = `${x.sourceLabel} · ${isOff(x) ? 'off' : 'on'}${can ? ' · click to switch' : ' · ' + (x.toggleNote || 'read-only')}`;
+    return `<button class="chip ${isOff(x) ? 'off' : ''}" data-toggle="${esc(x.id)}" ${can ? '' : 'disabled'} title="${esc(tip)}"><i></i>${esc(toolShort(x.agent))}${x.projectScoped ? ' · project' : ''}</button>`;
+  }).join('');
+  const maxTok = Math.max(...g.map((x) => x.tokens || 0));
+  let num;
+  if (lead.kind === 'mcp' && !lead.measured) {
+    num = g.some((x) => S.probing.has(x.id)) ? '<div class="item-num"><span class="spin"></span><small>measuring</small></div>'
+      : `<div class="item-num"><button class="btn acc" data-measure="${esc(lead.id)}">Measure</button></div>`;
+  } else {
+    num = `<div class="item-num"><div class="big">${fmt(maxTok)}</div><small>${new Set(g.map((x) => x.tokens)).size > 1 ? 'up to, per request' : 'tokens / request'}</small></div>`;
+  }
+  const pills = [];
+  if (g.some((x) => x.isNew)) pills.push('<span class="pill new">NEW</span>');
+  pills.push(`<span class="pill ${onCount ? 'good' : ''}">on in ${onCount} of ${g.length}</span>`);
+  if (lead.kind === 'mcp' && lead.probe?.source) pills.push(`<span class="pill line">measured from ${esc(lead.probe.source)}</span>`);
+  const sub = lead.kind === 'mcp'
+    ? `Set up in ${g.length} places · ${lead.transport}${lead.measured ? ` · ${lead.probe.toolCount} tools` : ''}`
+    : `Installed in ${g.length} places`;
+  return `<div class="item ${onCount ? '' : 'off'}">
+    <div class="item-top"><div class="grow"><div class="t">${esc(lead.name)}</div><div class="s">${esc(sub)}</div></div></div>
+    ${lead.description ? `<div class="d">${esc(lead.description)}</div>` : ''}
+    ${lead.kind === 'mcp' && lead.target ? `<div class="tgt" title="${esc(lead.target)}">${esc(lead.target)}</div>` : ''}
+    <div class="chips">${chips}</div>
+    <div class="item-foot"><div class="grow">${pills.join('')}</div>${num}</div>
+  </div>`;
 }
 
 const SRC_WHY = { local: 'Off in this project', project: 'Off in project settings', user: 'Off in all projects', plugin: 'Plugin is off', 'claude-code': 'Off via /mcp', mcpjson: 'Rejected in .mcp.json' };
@@ -480,7 +579,7 @@ function itemCard(it, max) {
   const key = esc(it.id);
   const busy = S.busy.has(it.id);
 
-  const subParts = [it.sourceLabel];
+  const subParts = [it.agent === 'claude' && S.tool === 'all' ? `Claude Code · ${it.sourceLabel}` : it.sourceLabel];
   if (it.subtype === 'command') subParts.push('command');
   if (it.kind === 'mcp') { subParts.push(it.transport); if (it.probe?.toolCount != null && it.measured) subParts.push(`${it.probe.toolCount} tools`); }
   if (it.kind === 'plugin') { const c = it.counts; subParts.push(`${c.skills} skills · ${c.agents} agents · ${c.mcps} MCP`); if (it.version) subParts.push('v' + it.version); }
@@ -637,6 +736,8 @@ const findItem = (id) => [...S.inv.mcps, ...S.inv.skills, ...S.inv.agents, ...S.
 
 document.addEventListener('click', async (e) => {
   const t = e.target.closest('button'); if (!t) return;
+  if (t.dataset.project) { S.project = t.dataset.project; store.set('project', S.project); $('#project').value = S.project; await Promise.all([loadInventory(), loadStats()]); window.scrollTo({ top: 0 }); return; }
+  if (t.dataset.tool) { S.tool = t.dataset.tool; store.set('tool', S.tool); renderToolNav(); renderNav(); renderView(); return; }
   if (t.dataset.tab) { S.tab = t.dataset.tab; S.q = ''; S.filter = 'all'; store.set('tab', S.tab); renderNav(); renderView(); window.scrollTo({ top: 0 }); return; }
   if (t.dataset.style && t.closest('#styles')) { applyStyle(t.dataset.style); return; }
   if (t.dataset.f) { S.filter = t.dataset.f; renderView(); return; }

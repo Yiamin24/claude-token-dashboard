@@ -6,6 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'td-scan-'));
+// Point the home folder at the temp dir so no real AI-tool configs are read.
+process.env.HOME = root;
+process.env.USERPROFILE = root;
+process.env.APPDATA = path.join(root, 'AppData');
+process.env.XDG_CONFIG_HOME = path.join(root, '.config');
 const cfg = path.join(root, 'cfg');
 const proj = path.join(root, 'proj');
 process.env.CLAUDE_CONFIG_DIR = cfg;

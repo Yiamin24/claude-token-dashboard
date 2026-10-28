@@ -73,8 +73,16 @@ export function isFile(p) {
   try { return fs.statSync(p).isFile(); } catch { return false; }
 }
 
+/** Directory entries; symlinks/junctions report what they point to (skill installers link folders). */
 export function listDir(p) {
-  try { return fs.readdirSync(p, { withFileTypes: true }); } catch { return []; }
+  let entries;
+  try { entries = fs.readdirSync(p, { withFileTypes: true }); } catch { return []; }
+  return entries.map((e) => {
+    if (!e.isSymbolicLink()) return e;
+    let st = null;
+    try { st = fs.statSync(path.join(p, e.name)); } catch {}
+    return { name: e.name, isDirectory: () => Boolean(st?.isDirectory()), isFile: () => Boolean(st?.isFile()), isSymbolicLink: () => true };
+  });
 }
 
 /** Minimal YAML front-matter reader: top-level scalar keys, quoted strings and | / > blocks. */

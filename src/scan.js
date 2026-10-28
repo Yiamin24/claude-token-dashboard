@@ -9,6 +9,7 @@ import {
   isDir, isFile, listDir, parseFrontmatter,
 } from './util.js';
 import { loadState, updateState } from './state.js';
+import { scanOtherAgents, toggleNote as agentToggleNote, AGENTS, discoverProjects, projectFootprint } from './agents.js';
 
 const SKILL_DESC_CAP = 1536; // Claude Code's default skillListingMaxDescChars
 const DEFERRED_THRESHOLD = 20000; // ~10% of a 200k window: above this Claude Code defers MCP tool schemas
@@ -42,17 +43,53 @@ function projectEntry(claudeJson, project) {
   return merged;
 }
 
+let projectsCache = { at: 0, list: null };
+
+/** Every project any AI tool knows about, with a count of its own (project-level) MCP servers and skills. */
 export function knownProjects(launchProject) {
+  if (projectsCache.list && Date.now() - projectsCache.at < 30000) {
+    return markLaunch(projectsCache.list, launchProject);
+  }
   const cj = readJson(CLAUDE_JSON, {}) || {};
   const map = new Map();
-  const add = (p, extra = {}) => {
+  const add = (p) => {
     if (!p) return;
     const k = projKey(p);
-    if (!map.has(k)) map.set(k, { path: normProject(p), exists: isDir(p), ...extra });
+    if (!map.has(k)) map.set(k, { path: normProject(p), exists: isDir(p) });
   };
-  if (launchProject) add(launchProject, { launch: true });
+  if (launchProject) add(launchProject);
   for (const k of Object.keys(cj.projects || {})) add(k);
-  return [...map.values()].sort((a, b) => (b.launch ? 1 : 0) - (a.launch ? 1 : 0) || a.path.localeCompare(b.path));
+  for (const p of discoverProjects()) add(p);
+  // Claude Code session history: each ~/.claude/projects/<slug> holds transcripts that record the folder (cwd).
+  for (const e of listDir(path.join(CLAUDE_DIR, 'projects'))) {
+    if (!e.isDirectory()) continue;
+    const dir = path.join(CLAUDE_DIR, 'projects', e.name);
+    const newest = listDir(dir).filter((f) => f.name.endsWith('.jsonl'))
+      .map((f) => { try { return { f: path.join(dir, f.name), t: fs.statSync(path.join(dir, f.name)).mtimeMs }; } catch { return null; } })
+      .filter(Boolean).sort((a, b) => b.t - a.t)[0];
+    const m = newest && /"cwd":"((?:[^"\\]|\\.)+)"/.exec(readHead(newest.f, 262144));
+    if (m) { try { add(JSON.parse(`"${m[1]}"`)); } catch {} }
+  }
+  for (const p of map.values()) {
+    p.footprint = p.exists ? projectFootprint(p.path) : { mcps: 0, skills: 0, total: 0, tools: [] };
+    // Claude Code "local" servers live in ~/.claude.json, not in the project folder.
+    const local = Object.keys(projectEntry(cj, p.path).mcpServers || {}).length;
+    if (local) {
+      p.footprint.mcps += local;
+      p.footprint.total += local;
+      if (!p.footprint.tools.includes('claude')) p.footprint.tools.push('claude');
+    }
+  }
+  const list = [...map.values()].filter((p) => p.exists).sort((a, b) => (b.footprint.total ? 1 : 0) - (a.footprint.total ? 1 : 0) || a.path.localeCompare(b.path));
+  projectsCache = { at: Date.now(), list };
+  return markLaunch(list, launchProject);
+}
+
+function markLaunch(list, launchProject) {
+  const lk = launchProject ? projKey(launchProject) : null;
+  const out = list.map((p) => ({ ...p, launch: projKey(p.path) === lk }));
+  out.sort((a, b) => (b.launch ? 1 : 0) - (a.launch ? 1 : 0));
+  return out;
 }
 
 // ---------- skills / commands / agents ----------
@@ -255,9 +292,17 @@ function loadPlugins(project) {
 
 // ---------- MCP ----------
 
+/** Same server = same hash, however each tool spells its config (so one measurement covers all tools). */
 export function mcpConfigHash(cfg) {
-  const { type, command, args, url } = cfg || {};
-  return crypto.createHash('sha1').update(JSON.stringify({ type, command, args, url })).digest('hex').slice(0, 16);
+  const c = cfg || {};
+  let command = c.command;
+  let args = c.args || [];
+  if (Array.isArray(command)) { args = command.slice(1); command = command[0]; }
+  const url = c.url || c.serverUrl || c.httpUrl || null;
+  const remote = Boolean(url && !command);
+  const type = remote ? (c.type === 'sse' ? 'sse' : 'http') : 'stdio';
+  const key = remote ? { type, url } : { type, command: String(command || '').toLowerCase(), args: (args || []).map(String) };
+  return crypto.createHash('sha1').update(JSON.stringify(key)).digest('hex').slice(0, 16);
 }
 
 function wildcard(pattern) {
@@ -370,12 +415,55 @@ export function inventory(projectIn, { fresh = false, track = true } = {}) {
     a.loaded = loadedTokens(a);
   }
 
+  for (const x of [...skills, ...agents, ...pluginItems]) x.agent = 'claude';
+
+  // Other AI tools on this machine (Codex, Gemini CLI, Antigravity, Kiro, Cursor...)
+  const other = scanOtherAgents(project, { readSkill, findSkillFiles });
+  for (const s of other.skills) s.loaded = loadedTokens(s);
+  skills.push(...other.skills);
+
   // MCP servers
   const probes = state.probes || {};
-  const mcps = mcpRaw.map((m) => {
+  // Antigravity stores each server's tool list on disk; reuse it for any tool running the same server.
+  const cachedByHash = new Map();
+  for (const m of other.mcps) {
+    const c = other.cachedProbes.get(m.name);
+    if (c) cachedByHash.set(mcpConfigHash(m.cfg), c);
+  }
+  const probeFor = (cfg) => { const h = mcpConfigHash(cfg); return probes[h] || cachedByHash.get(h) || null; };
+  const mcpItem = (m, cfg, probe, st, extra) => {
+    const toolNames = probe?.tools?.map((t) => t.name) || [];
+    const namesTokens = toolNames.reduce((n, t) => n + estTokens(`mcp__${m.name}__${t}`) + 1, 0);
+    const instr = probe?.instructionsTokens || 0;
+    return {
+      id: m.id, kind: 'mcp', name: m.name, displayName: m.name, source: m.source, sourceLabel: m.sourceLabel,
+      plugin: m.plugin || null, projectScoped: Boolean(m.projectScoped),
+      transport: cfg.type || (cfg.url ? 'http' : 'stdio'),
+      target: cfg.url || [cfg.command, ...(cfg.args || [])].filter(Boolean).join(' '),
+      description: probe?.serverName ? `${probe.serverName}${probe.serverVersion ? ' ' + probe.serverVersion : ''}` : '',
+      configHash: mcpConfigHash(cfg),
+      probe: probe ? { status: probe.status, error: probe.error, toolCount: toolNames.length, measuredAt: probe.measuredAt, source: probe.source } : null,
+      fullTokens: probe?.status === 'ok' ? probe.schemaTokens + instr : null,
+      deferredTokens: probe?.status === 'ok' ? namesTokens + instr : null,
+      toolsTop: (probe?.tools || []).slice().sort((a, b) => b.tokens - a.tokens).slice(0, 8),
+      ...st,
+      ...extra,
+    };
+  };
+  const otherMcps = other.mcps.map((m) => {
+    rawMcp.set(m.id, { name: m.name, cfg: m.cfg });
+    const st = m.on ? { state: 'on', stateSource: 'default' } : { state: 'off', stateSource: m.pluginOn === false ? 'plugin' : 'config' };
+    return mcpItem({ ...m, source: m.agent }, m.cfg, probeFor(m.cfg), st, {
+      agent: m.agent, file: m.file, toggle: m.toggle, container: m.container, agentPlugin: m.plugin,
+      toggleable: Boolean(m.toggle) && !m.plugin,
+      toggleNote: m.plugin ? 'Comes from a plugin: switch the plugin instead' : !m.toggle ? agentToggleNote(m.agent) : undefined,
+    });
+  });
+
+  const claudeMcps = mcpRaw.map((m) => {
     const cfg = m.cfg || {};
     rawMcp.set(m.id, { name: m.name, cfg });
-    const probe = probes[mcpConfigHash(cfg)] || null;
+    const probe = probeFor(cfg);
     let st = { state: 'on', stateSource: 'default' };
     if (m.plugin && !m.pluginOn) st = { state: 'off', stateSource: 'plugin' };
     else {
@@ -388,47 +476,70 @@ export function inventory(projectIn, { fresh = false, track = true } = {}) {
         if (off.includes(m.name)) st = { state: 'off', stateSource: 'mcpjson' };
       }
     }
-    const toolNames = probe?.tools?.map((t) => t.name) || [];
-    const namesTokens = toolNames.reduce((n, t) => n + estTokens(`mcp__${m.name}__${t}`) + 1, 0);
-    const instr = probe?.instructionsTokens || 0;
-    return {
-      id: m.id, kind: 'mcp', name: m.name, displayName: m.name, source: m.source, sourceLabel: m.sourceLabel,
-      plugin: m.plugin || null, projectScoped: Boolean(m.projectScoped),
-      transport: cfg.type || (cfg.url ? 'http' : 'stdio'),
-      target: cfg.url || [cfg.command, ...(cfg.args || [])].filter(Boolean).join(' '),
-      description: probe?.serverName ? `${probe.serverName}${probe.serverVersion ? ' ' + probe.serverVersion : ''}` : '',
-      configHash: mcpConfigHash(cfg),
-      probe: probe ? { status: probe.status, error: probe.error, toolCount: toolNames.length, measuredAt: probe.measuredAt } : null,
-      fullTokens: probe?.status === 'ok' ? probe.schemaTokens + instr : null,
-      deferredTokens: probe?.status === 'ok' ? namesTokens + instr : null,
-      toolsTop: (probe?.tools || []).slice().sort((a, b) => b.tokens - a.tokens).slice(0, 8),
-      ...st,
+    return mcpItem(m, cfg, probe, st, {
+      agent: 'claude',
       toggleable: !m.plugin,
       toggleNote: m.plugin ? 'Comes from a plugin: switch the plugin instead' : st.stateSource === 'claude-code' ? 'Disabled in Claude Code /mcp' : undefined,
-    };
+    });
   });
 
-  const enabledFull = mcps.filter((m) => m.state === 'on').reduce((n, m) => n + (m.fullTokens || 0), 0);
+  // Deferred loading is a Claude Code feature; other tools are counted with full schemas.
+  const enabledFull = claudeMcps.filter((m) => m.state === 'on').reduce((n, m) => n + (m.fullTokens || 0), 0);
   const pref = state.prefs.mcpMode;
   const mcpMode = pref === 'auto' ? (enabledFull > DEFERRED_THRESHOLD ? 'deferred' : 'full') : pref;
+  const mcps = [...claudeMcps, ...otherMcps];
   for (const m of mcps) {
-    m.tokens = m.fullTokens == null ? 0 : mcpMode === 'full' ? m.fullTokens : m.deferredTokens;
+    const mode = m.agent === 'claude' ? mcpMode : 'full';
+    m.tokens = m.fullTokens == null ? 0 : mode === 'full' ? m.fullTokens : m.deferredTokens;
     m.measured = m.fullTokens != null;
     m.tokensNameOnly = 0;
     m.loaded = loadedTokens(m);
   }
 
+  // Antigravity plugins
+  for (const p of other.plugins) {
+    p.toggleable = Boolean(p.toggle);
+    if (!p.toggle) p.toggleNote = 'Antigravity config could not be read safely';
+    pluginItems.push(p);
+  }
+
   // Plugin totals come from their children.
   for (const p of pluginItems) {
-    const kids = [...skills, ...agents, ...mcps].filter((x) => x.plugin === p.pluginId);
+    const kids = p.agent === 'claude'
+      ? [...skills, ...agents, ...mcps].filter((x) => x.agent === 'claude' && x.plugin === p.pluginId)
+      : [...skills, ...mcps].filter((x) => x.agent === p.agent && x.agentPlugin === p.pluginKey);
     p.tokens = kids.reduce((n, k) => n + (k.tokens || 0), 0);
     p.loaded = kids.reduce((n, k) => n + (k.loaded || 0), 0);
     p.unmeasured = kids.filter((k) => k.kind === 'mcp' && !k.measured).length;
-    p.toggleable = true;
+    if (p.agent === 'claude') p.toggleable = true;
   }
 
-  const countables = [...skills, ...agents, ...mcps];
   const sum = (arr, f) => arr.reduce((n, x) => n + f(x), 0);
+
+  // Per-tool summary
+  const agentList = [{ id: 'claude', name: AGENTS.claude.name, short: AGENTS.claude.short, detected: true, files: [] }, ...other.agents];
+  const byAgent = agentList.map((a) => {
+    const ms = mcps.filter((x) => x.agent === a.id);
+    const ss = skills.filter((x) => x.agent === a.id);
+    const ps = pluginItems.filter((x) => x.agent === a.id);
+    const ag = agents.filter((x) => x.agent === a.id);
+    const all = [...ms, ...ss, ...ag];
+    const isOn = (x) => x.state !== 'off' && x.state !== 'user-invocable-only';
+    return {
+      ...a,
+      detected: a.detected || all.length > 0,
+      mcps: { on: ms.filter(isOn).length, total: ms.length },
+      skills: { on: ss.filter(isOn).length, total: ss.length },
+      plugins: { on: ps.filter(isOn).length, total: ps.length },
+      activeTokens: sum(all, (x) => x.loaded),
+      savedTokens: sum(all, (x) => (x.tokens || 0) - x.loaded),
+      unmeasuredMcps: ms.filter((m) => !m.measured && !m.probe).length,
+    };
+  }).filter((a) => a.detected);
+
+  // Headline numbers and live savings are for Claude Code (its transcripts are what the tracker reads).
+  const countables = [...skills, ...agents, ...mcps].filter((x) => x.agent === 'claude');
+  const uniq = (arr) => new Set(arr.map((m) => m.configHash)).size;
   const byKind = {};
   for (const k of ['mcp', 'skill', 'agent']) {
     const arr = countables.filter((x) => x.kind === k);
@@ -437,9 +548,9 @@ export function inventory(projectIn, { fresh = false, track = true } = {}) {
   const totals = {
     activeTokens: sum(countables, (x) => x.loaded),
     savedTokens: sum(countables, (x) => (x.tokens || 0) - x.loaded),
-    // Never tried yet (servers that need sign-in are reported separately).
-    unmeasuredMcps: mcps.filter((m) => !m.measured && !m.probe).length,
-    unmeasurableMcps: mcps.filter((m) => !m.measured && m.probe).length,
+    // Distinct servers (across all tools) never measured yet; sign-in servers are reported separately.
+    unmeasuredMcps: uniq(mcps.filter((m) => !m.measured && !m.probe)),
+    unmeasurableMcps: uniq(mcps.filter((m) => !m.measured && m.probe)),
     byKind,
   };
 
@@ -453,7 +564,7 @@ export function inventory(projectIn, { fresh = false, track = true } = {}) {
 
   const value = {
     project, generatedAt: new Date().toISOString(), mcpMode, mcpModePref: pref, totals,
-    mcps, skills, agents, plugins: pluginItems,
+    mcps, skills, agents, plugins: pluginItems, tools: byAgent, toolNames: Object.fromEntries(Object.entries(AGENTS).map(([k, v]) => [k, v.short])), watchFiles: other.files,
     newItems: Object.entries(fresh_state.newItems).map(([id, v]) => ({ id, ...v })),
     savingsItems: countables.filter((x) => (x.tokens || 0) - x.loaded > 0).map((x) => ({ id: x.id, saved: (x.tokens || 0) - x.loaded })),
   };
@@ -468,7 +579,7 @@ function trackNew(items, project) {
   const s0 = loadState();
   const pk = projKey(project);
   const unseen = items.filter((it) => !s0.known[it.id]);
-  if (!unseen.length && s0.initialized && s0.seenProjects[pk]) return [];
+  if (!unseen.length && s0.initialized && s0.seenProjects[pk] && s0.agentsBaselined) return [];
   return updateState((s) => {
     const now = new Date().toISOString();
     const firstEver = !s.initialized;
@@ -477,11 +588,14 @@ function trackNew(items, project) {
     for (const it of items) {
       if (s.known[it.id]) continue;
       s.known[it.id] = now;
-      if (firstEver || (firstForProject && it.projectScoped)) continue;
+      // Items from other AI tools were added in a later version: baseline them silently once.
+      const otherToolsFirstScan = !s.agentsBaselined && it.agent && it.agent !== 'claude';
+      if (firstEver || otherToolsFirstScan || (firstForProject && it.projectScoped)) continue;
       s.newItems[it.id] = { name: it.displayName, kind: it.kind, source: it.sourceLabel, firstSeen: now };
       added.push(it.id);
     }
     s.initialized = true;
+    s.agentsBaselined = true;
     s.seenProjects[pk] = s.seenProjects[pk] || now;
     return added;
   });

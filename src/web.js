@@ -104,6 +104,7 @@ export class Dashboard {
     this.tracker.on('update', () => this.broadcastSoon('usage'));
     this.tracker.start().catch((e) => log('tracker failed:', e.message));
     this.watchProject(this.launchProject);
+    setTimeout(() => this.rescan(), 500);
     const watchPath = (p, opts, filter) => {
       try {
         const w = fs.watch(p, opts, (_e, name) => { if (!filter || filter(String(name || ''))) this.onConfigChange(); });
@@ -140,6 +141,21 @@ export class Dashboard {
     }
   }
 
+  /** Watch another AI tool's config file (its folder, filtered by name) or skills folder. */
+  watchConfig(p) {
+    this.watchedConfigs ||= new Set();
+    if (this.watchedConfigs.has(p)) return;
+    this.watchedConfigs.add(p);
+    try {
+      const dir = fs.statSync(p).isDirectory();
+      const target = dir ? p : path.dirname(p);
+      const base = path.basename(p);
+      const w = fs.watch(target, dir ? { recursive: true } : {}, (_e, n) => { if (dir || String(n) === base) this.onConfigChange(); });
+      w.on('error', () => {});
+      this.watchers.push(w);
+    } catch {}
+  }
+
   onConfigChange() {
     clearTimeout(this.changeTimer);
     this.changeTimer = setTimeout(() => this.rescan(), 700);
@@ -154,6 +170,7 @@ export class Dashboard {
     for (const p of projects) {
       try {
         const inv = inventory(p, { fresh: true });
+        for (const f of inv.watchFiles || []) this.watchConfig(f);
         const sig = JSON.stringify([inv.totals, inv.newItems.length, inv.mcps.length, inv.skills.length, inv.plugins.map((x) => x.state)]);
         const key = projKey(p);
         this.sigs ||= new Map();

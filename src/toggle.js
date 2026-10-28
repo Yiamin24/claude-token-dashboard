@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, readJsonForEdit, writeJsonAtomic, normProject } from './util.js';
 import { inventory, invalidateInventory, settingsPaths } from './scan.js';
+import { AGENTS, setAgentState } from './agents.js';
 
 const SKILL_STATES = new Set(['on', 'off', 'name-only', 'user-invocable-only']);
 
@@ -37,9 +38,10 @@ function cleanEmpty(obj, key) {
   if (Array.isArray(v) && v.length === 0) delete obj[key];
 }
 
-/** Find an item by id or by (case-insensitive) name. */
-export function findItems(inv, query, kind) {
-  const all = [...inv.mcps, ...inv.skills, ...inv.agents, ...inv.plugins].filter((x) => !kind || x.kind === kind);
+/** Find an item by id or by (case-insensitive) name, optionally limited to one AI tool. */
+export function findItems(inv, query, kind, agent) {
+  const all = [...inv.mcps, ...inv.skills, ...inv.agents, ...inv.plugins]
+    .filter((x) => (!kind || x.kind === kind) && (!agent || agent === 'all' || x.agent === agent));
   const byId = all.filter((x) => x.id === query);
   if (byId.length) return byId;
   const q = String(query).toLowerCase();
@@ -52,16 +54,44 @@ export function findItems(inv, query, kind) {
  * Switch an item on or off.
  * @returns {{ ok: boolean, message: string, file?: string, item?: object }}
  */
-export function setItemState({ project, id, name, kind, state, scope = 'project' }) {
+export function setItemState({ project, id, name, kind, state, scope = 'project', agent }) {
   project = normProject(project);
   if (!['project', 'global'].includes(scope)) return { ok: false, message: `Unknown scope "${scope}"` };
   const inv = inventory(project, { fresh: true, track: false });
-  const matches = findItems(inv, id || name, kind);
-  if (!matches.length) return { ok: false, message: `Nothing called "${id || name}" was found` };
+  // By name with no tool given, Claude Code is meant (that's where this server runs).
+  const matches = findItems(inv, id || name, kind, id ? undefined : agent || 'claude');
+  if (!matches.length) return { ok: false, message: `Nothing called "${id || name}" was found${!id && (agent || 'claude') !== 'all' ? ` in ${AGENTS[agent || 'claude']?.name || agent}` : ''}` };
+
+  // agent "all": switch the same-named item in every tool that allows it.
+  if (agent === 'all' && !id && matches.length > 1) {
+    const results = matches.map((m) => setItemState({ project, id: m.id, state, scope }));
+    const ok = results.filter((r) => r.ok);
+    const failed = results.filter((r) => !r.ok);
+    return {
+      ok: ok.length > 0,
+      message: [ok.length ? `Switched ${state} in ${ok.length} place(s): ${ok.map((r) => AGENTS[r.item?.agent]?.name || r.item?.agent).join(', ')}.` : '',
+        failed.length ? `Not switched in ${failed.length}: ${failed.map((r) => r.message).join(' ')}` : ''].filter(Boolean).join(' '),
+    };
+  }
   if (matches.length > 1) {
-    return { ok: false, message: `"${id || name}" matches several items: ${matches.slice(0, 8).map((m) => `${m.displayName} (${m.kind})`).join(', ')}. Use the exact name.` };
+    return { ok: false, message: `"${id || name}" matches several items: ${matches.slice(0, 8).map((m) => `${m.displayName} (${m.kind}, ${AGENTS[m.agent]?.name || m.agent})`).join(', ')}. Use the exact name.` };
   }
   const item = matches[0];
+
+  // Other AI tools: write that tool's own config file.
+  if (item.agent && item.agent !== 'claude') {
+    if (item.kind === 'skill') return { ok: false, message: item.toggleNote || 'Skills of this tool cannot be switched here.' };
+    if (!item.toggleable) return { ok: false, message: item.toggleNote || `Can't switch ${item.displayName} from here.` };
+    try { setAgentState(item, state !== 'off'); } catch (e) { return { ok: false, message: e.message }; }
+    invalidateInventory();
+    const after = findItems(inventory(project, { fresh: true, track: false }), item.id)[0];
+    return {
+      ok: true,
+      message: `${item.displayName} is now ${after?.state ?? state} in ${AGENTS[item.agent].name}. Restart ${AGENTS[item.agent].name} (or start a new session) to apply it.`,
+      file: item.file,
+      item: after,
+    };
+  }
   const paths = settingsPaths(project);
   const file = scope === 'global' ? paths.user : paths.local;
   let note = '';

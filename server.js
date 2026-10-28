@@ -35,18 +35,25 @@ function startMcp() {
     },
     {
       name: 'context_report',
-      description: 'List the MCP servers, skills and plugins loaded in this project with their estimated token cost, tokens saved so far, and newly detected items.',
-      inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'Max rows per section (default 15)' } } },
+      description: 'List MCP servers, skills and plugins for this project across AI tools (Claude Code, Codex, Gemini, Cursor...) with estimated token cost, savings and new items.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Max rows per section (default 15)' },
+          agent: { type: 'string', description: 'Tool id: claude (default), codex, gemini, antigravity, kiro, cursor, vscode, opencode... or all' },
+        },
+      },
     },
     {
       name: 'context_toggle',
-      description: 'Switch an MCP server, skill or plugin on or off for this project or all projects. Applies to new Claude Code sessions.',
+      description: 'Switch an MCP server, skill or plugin on or off, in Claude Code (default) or another AI tool. Applies to new sessions.',
       inputSchema: {
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Item name, e.g. "playwright" or "superpowers:brainstorming"' },
           state: { type: 'string', enum: ['on', 'off', 'name-only'], description: 'name-only keeps a skill listed without its description' },
-          scope: { type: 'string', enum: ['project', 'global'], description: 'Default project' },
+          scope: { type: 'string', enum: ['project', 'global'], description: 'Claude Code only. Default project' },
+          agent: { type: 'string', description: 'Tool id (default claude), or all to switch it in every tool' },
         },
         required: ['name', 'state'],
       },
@@ -62,21 +69,26 @@ function startMcp() {
       if (args.open !== false) openBrowser(r.url);
       return text(`Token dashboard: ${r.url}${r.error ? `\n${r.error}` : ''}`);
     }
-    if (name === 'context_report') return text(report(Number(args.limit) || 15));
+    if (name === 'context_report') return text(report(Number(args.limit) || 15, args.agent || 'claude'));
     if (name === 'context_toggle') {
-      const r = setItemState({ project: launchProject, name: args.name, state: args.state, scope: args.scope || 'project' });
+      const r = setItemState({ project: launchProject, name: args.name, state: args.state, scope: args.scope || 'project', agent: args.agent || 'claude' });
       return text(r.message, !r.ok);
     }
     throw Object.assign(new Error(`Unknown tool ${name}`), { code: -32602 });
   }
 
-  function report(limit) {
+  function report(limit, agent) {
     const inv = inventory(launchProject, { fresh: true });
     const ledger = loadLedger();
     const t = inv.totals;
     const lines = [];
+    const pick = (arr) => (agent === 'all' ? arr : arr.filter((x) => x.agent === agent));
     lines.push(`Project: ${inv.project}`);
-    lines.push(`Loaded each request: ~${fmtNum(t.activeTokens)} tokens. Switched off: ~${fmtNum(t.savedTokens)} tokens per request.`);
+    lines.push('\nAI tools found:');
+    for (const a of inv.tools) {
+      lines.push(`- ${a.name} (${a.id}): ${a.mcps.on}/${a.mcps.total} MCP on, ${a.skills.total} skills${a.plugins.total ? `, ${a.plugins.on}/${a.plugins.total} plugins` : ''}, ~${fmtNum(a.activeTokens)} tok/request${a.unmeasuredMcps ? ` (+${a.unmeasuredMcps} MCP not measured)` : ''}`);
+    }
+    lines.push(`\nShowing: ${agent === 'all' ? 'all tools' : agent}. Claude Code loads ~${fmtNum(t.activeTokens)} tokens each request; switched off: ~${fmtNum(t.savedTokens)} per request.`);
     lines.push(`Saved so far: ${fmtNum(ledger.savedTokens)} tokens over ${fmtNum(ledger.requests)} tracked requests (since ${ledger.startedAt.slice(0, 10)}).`);
     if (t.unmeasuredMcps) lines.push(`${t.unmeasuredMcps} MCP server(s) not measured yet: open the dashboard and click "Measure".`);
     lines.push(`MCP tool schemas counted as: ${inv.mcpMode}.`);
@@ -85,13 +97,15 @@ function startMcp() {
       lines.push(`\n${title}`);
       for (const it of [...items].sort((a, b) => (b.tokens || 0) - (a.tokens || 0)).slice(0, limit)) {
         const cost = it.kind === 'mcp' && !it.measured ? 'not measured' : `~${fmtNum(it.tokens || 0)} tok`;
-        lines.push(`- ${it.displayName} [${it.state}] ${cost} · ${it.sourceLabel}`);
+        lines.push(`- ${it.displayName} [${it.state}] ${cost} · ${it.sourceLabel}${it.toggleable === false && it.agent !== 'claude' ? ' · read-only' : ''}`);
       }
       if (items.length > limit) lines.push(`  …and ${items.length - limit} more`);
     };
-    section(`MCP servers (${inv.mcps.length})`, inv.mcps);
-    section(`Plugins (${inv.plugins.length})`, inv.plugins);
-    const ownSkills = inv.skills.filter((s) => !s.plugin);
+    const mcps = pick(inv.mcps);
+    const plugins = pick(inv.plugins);
+    section(`MCP servers (${mcps.length})`, mcps);
+    section(`Plugins (${plugins.length})`, plugins);
+    const ownSkills = pick(inv.skills).filter((s) => !s.plugin && !s.agentPlugin);
     section(`Skills & commands outside plugins (${ownSkills.length})`, ownSkills);
     lines.push(`\nDashboard: ${dashboard.url}`);
     return lines.join('\n');

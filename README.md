@@ -43,6 +43,35 @@ To run only the dashboard, without Claude Code:
 npm start        # node server.js --standalone
 ```
 
+## Works across your AI tools
+
+It also reads the MCP servers and skills of other AI coding tools on the same machine. That covers both global and project-level config, so you can see everything that loads, wherever it's set up. When the same server or skill is set up in several tools, it shows as **one card with a switch per tool**.
+
+| Tool | MCP servers read from | Skills read from | Switch on/off from the dashboard |
+|---|---|---|---|
+| Claude Code | `~/.claude.json`, `.mcp.json`, plugins | `~/.claude/skills`, `.claude/skills`, plugins | MCP, skills, plugins |
+| Codex | `~/.codex/config.toml`, `.codex/config.toml` | `~/.codex/skills` | MCP (`enabled = false`) |
+| Gemini CLI | `~/.gemini/settings.json`, `.gemini/settings.json`, extensions | `~/.gemini/skills`, `.gemini/skills` | MCP (`mcp.excluded`) |
+| Antigravity | `~/.gemini/config/mcp_config.json`, plugins | `~/.gemini/config/skills`, plugins, built-in | Plugins (`enabled`) |
+| Kiro | `~/.kiro/settings/mcp.json`, `.kiro/settings/mcp.json` | `~/.kiro/skills`, `.kiro/skills` | MCP (`disabled`) |
+| OpenCode | `~/.config/opencode/opencode.json`, `opencode.json` | `~/.config/opencode/skills`, `.opencode/skills` | MCP (`enabled`) |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `~/.codeium/windsurf/skills`, `.windsurf/skills` | MCP (`disabled`) |
+| Devin | | `~/.devin/skills`, `.devin/skills` | read-only |
+| Cline / Roo Code / Kilo Code | editor `globalStorage` settings, `.roo/mcp.json` | | MCP (`disabled`) |
+| Copilot CLI | `~/.copilot/mcp-config.json` | `~/.copilot/skills`, `.github/skills` | read-only |
+| VS Code (Copilot) | user `mcp.json`, `.vscode/mcp.json` | | read-only |
+| Cursor | `~/.cursor/mcp.json`, `.cursor/mcp.json` | `~/.cursor/skills`, `.cursor/skills` | read-only |
+| Zed, Claude Desktop | `settings.json` / `claude_desktop_config.json` | | read-only |
+| Shared | | `~/.agents/skills`, `.agents/skills` | read-only |
+
+"Read-only" means the tool keeps its on/off state inside the app instead of in a file, so the dashboard shows the item and its cost but you switch it in that tool. Skills of other tools are read-only too, because those tools have no per-skill setting. Every file the dashboard writes is backed up first, and only the one setting is changed.
+
+**Projects:** the project list comes from every tool, not just Claude Code: Claude Code's project list and session history, Codex's trusted projects, Antigravity's projects, and the workspace history of VS Code, Kiro, Cursor and Windsurf. It also includes folders under Desktop and Documents that have their own AI-tool setup. Projects with their own MCP servers or skills are listed on the overview; click one to see what it adds.
+
+Measuring a server once covers every tool that runs the same server. Antigravity caches each connected server's tool list on disk, and the dashboard reads that cache, so those servers are measured without being started.
+
+From Claude: `context_report` takes `agent` (`codex`, `gemini`, … or `all`). `context_toggle` takes `agent` too, and `agent: "all"` switches the same server in every tool that allows it.
+
 ## What it does
 
 | Area | Details |
@@ -83,6 +112,7 @@ Claude Code switches to deferred when MCP tools would fill more than about 10% o
 ```
 server.js        MCP stdio server + --standalone entry
 src/scan.js      finds items, works out on/off state and token cost, spots new items
+src/agents.js    other AI tools: Codex, Gemini, Antigravity, Kiro, Cursor, VS Code...
 src/toggle.js    writes switches to Claude Code settings (with backups)
 src/probe.js     measures MCP servers (stdio and HTTP)
 src/tracker.js   live transcript tailing and the savings ledger

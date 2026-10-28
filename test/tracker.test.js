@@ -6,6 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'td-tracker-'));
+// Point the home folder at the temp dir so no real AI-tool configs are read.
+process.env.HOME = root;
+process.env.USERPROFILE = root;
+process.env.APPDATA = path.join(root, 'AppData');
+process.env.XDG_CONFIG_HOME = path.join(root, '.config');
 process.env.CLAUDE_CONFIG_DIR = path.join(root, 'cfg');
 process.env.TOKEN_DASHBOARD_DATA = path.join(root, 'data');
 const projDir = path.join(root, 'cfg', 'projects', 'p1');
